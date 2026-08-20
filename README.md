@@ -134,7 +134,8 @@ is a stress case chosen to show the protection works where it matters.
 
 ### Waveform
 
-![Payload turn-on, unprotected vs shaped. Left (bypass mode): the bus sags to 3.05 V, below the 3.35 V brown-out line. Right (shaped): the FSM soft-starts the load via PWM — payload_pwm chops the current — and the bus holds at 3.48 V, above the threshold. state_o walks OFF → SHAPE → MONITOR.](<img width="1568" height="759" alt="image_2026-08-20_145646184" src="https://github.com/user-attachments/assets/816fc8d0-82ad-4d29-a065-cd23e381c0af" />)
+![Payload turn-on, unprotected vs shaped. Left (bypass mode): the bus sags to 3.05 V, below the 3.35 V brown-out line. Right (shaped): the FSM soft-starts the load via PWM — payload_pwm chops the current — and the bus holds at 3.48 V, above the threshold. state_o walks OFF → SHAPE → MONITOR.]
+<img width="1568" height="759" alt="image_2026-08-20_145646184" src="https://github.com/user-attachments/assets/816fc8d0-82ad-4d29-a065-cd23e381c0af" />
 
 **How to read it:** the same payload turn-on is run twice. In the first run
 (`bypass = 1`) the load connects directly and `v_bus_adc` plunges deep — this is the
