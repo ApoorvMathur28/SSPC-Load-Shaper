@@ -1,4 +1,4 @@
-# SSPC Load Shaper - RTL Design + SystemVerilog Verification
+# SSPC Load Shaper — RTL Design + SystemVerilog Verification
 
 A **sink-side (load-side) Solid-State Power Controller (SSPC) load shaper** for a
 CubeSat Electrical Power System (EPS), written in Verilog, with a class-based
@@ -24,25 +24,20 @@ soft-start to limit the average current the payload draws when it switches on.
 ## Repository layout
 
 ```
-rtl/
+RTL/
   sspc_load_shaper.v       # the DUT: FSM + PWM soft-start
-tb/
   tb_sspc.v                # plant-model testbench (shaped vs unprotected, prints min bus)
-verif/
+Verification/
   sspc_if.sv               # interface + clocking block
   sspc_txn.sv              # randomized transaction (constrained-random)
   sspc_driver.sv           # drives the DUT + runs the bus plant model
   sspc_scoreboard.sv       # self-checking pass/fail + feeds coverage
   sspc_coverage.sv         # functional coverage (covergroups + cross)
   tb_top.sv                # top: wires DUT to interface, runs 20 randomized txns
-scripts/
+Automation/
   triage.pl                # parses a sim log, reports pass/fail + coverage
-docs/
-  waveform.png             # bus voltage: unprotected sag vs shaped soft-start
+waveform.png               # bus voltage: unprotected sag vs shaped soft-start
 ```
-
-(You can keep everything flat in one folder if you prefer — the folder split above
-is just tidier.)
 
 ---
 
@@ -151,14 +146,14 @@ limit rather than a hand-picked test.
 
 ### Waveform
 
-![Payload turn-on, unprotected vs shaped. Left: the bus sags to 3.05 V, below the 3.35 V brown-out line. Right: the FSM soft-starts the load via PWM and the bus holds at 3.48 V.]
+[Payload turn-on, unprotected vs shaped. Left: the bus sags to 3.05 V, below the 3.35 V brown-out line. Right: the FSM soft-starts the load via PWM and the bus holds at 3.48 V.]
 <img width="1568" height="759" alt="image_2026-08-20_145646184" src="https://github.com/user-attachments/assets/816fc8d0-82ad-4d29-a065-cd23e381c0af" />
 
 ---
 
 ## Automation
 
-`scripts/triage.pl` parses a simulation log and reports results:
+`Automation/triage.pl` parses a simulation log and reports results:
 
 ```
 =======================================================
@@ -184,26 +179,24 @@ script.
 
 **RTL + plant testbench (the ~40% result):**
 ```
-xvlog rtl/sspc_load_shaper.v tb/tb_sspc.v
+xvlog RTL/sspc_load_shaper.v RTL/tb_sspc.v
 xelab tb_sspc -s sspc_sim -debug typical
 xsim sspc_sim -runall
 ```
 
 **SystemVerilog verification (coverage + scoreboard):**
 ```
-xvlog rtl/sspc_load_shaper.v
-xvlog -sv verif/sspc_if.sv verif/sspc_txn.sv verif/sspc_coverage.sv \
-         verif/sspc_driver.sv verif/sspc_scoreboard.sv verif/tb_top.sv
+xvlog RTL/sspc_load_shaper.v
+xvlog -sv Verification/sspc_if.sv Verification/sspc_txn.sv Verification/sspc_coverage.sv \
+         Verification/sspc_driver.sv Verification/sspc_scoreboard.sv Verification/tb_top.sv
 xelab tb_top -s sv_sim -debug typical
 xsim sv_sim -runall > sim_output.log
 ```
 
 **Triage:**
 ```
-perl scripts/triage.pl sim_output.log
+perl Automation/triage.pl sim_output.log
 ```
-
-(If your files are all in one folder, drop the `rtl/`, `tb/`, `verif/` prefixes.)
 
 ---
 
