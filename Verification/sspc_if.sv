@@ -1,10 +1,9 @@
-//======================================================================
-// sspc_if : interface bundling all DUT signals + a clocking block.
-// Every testbench component talks to the DUT through this, never
-// directly to the wires. This is the UVM-style wires/testbench split.
 `timescale 1ns / 1ps
+//======================================================================
+// sspc_if : bundles the DUT signals; clocking block sets drive/sample
+// timing relative to the clock edge (avoids testbench/DUT races).
+//======================================================================
 interface sspc_if (input logic clk);
-    // --- DUT signals ---
     logic        rst_n;
     logic [11:0] v_bus_adc;
     logic        adc_valid;
@@ -13,16 +12,9 @@ interface sspc_if (input logic clk);
     logic [1:0]  state_o;
     logic        fault_latch;
 
-    // --- Clocking block: defines WHEN the testbench drives/samples ---
-    // 'default input #1step output #1' = sample just before the edge,
-    // drive just after it. This avoids testbench-vs-DUT races.
     clocking cb @(posedge clk);
         default input #1step output #1;
-        output rst_n, v_bus_adc, adc_valid, payload_req;  // TB drives these
-        input  payload_pwm, state_o, fault_latch;          // TB samples these
+        output rst_n, v_bus_adc, adc_valid, payload_req;   // TB drives
+        input  payload_pwm, state_o, fault_latch;           // TB samples
     endclocking
-
-    // A modport groups signals by direction for a given user.
-    // The testbench uses the clocking block; the DUT sees raw wires.
-    modport TB (clocking cb, output rst_n);
-endinterface 
+endinterface

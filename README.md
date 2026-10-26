@@ -1,216 +1,138 @@
 # SSPC Load Shaper — RTL Design + SystemVerilog Verification
 
-A **sink-side (load-side) Solid-State Power Controller (SSPC) load shaper** for a
-CubeSat Electrical Power System (EPS), written in Verilog, with a class-based
-SystemVerilog verification environment and a Perl regression/triage script.
+A **sink-side Solid-State Power Controller (SSPC) load shaper** for a CubeSat
+Electrical Power System, written in Verilog, with a class-based SystemVerilog
+verification environment and a Perl triage script.
 
-The design sits in series with a single payload and soft-starts that payload's
-turn-on so its inrush current does not brown out the shared DC bus. A finite-state
-machine monitors the bus voltage through an ADC and applies an adaptive PWM
-soft-start to limit the average current the payload draws when it switches on.
+The SSPC sits in series with one payload. On every commanded turn-on it chops
+the payload's MOSFET with a PWM duty cycle that ramps from 0.8 % to 100 %, so the
+payload's empty input capacitor charges gradually and its inrush current cannot
+brown out the shared bus. While the payload runs, the SSPC watches the bus through
+an ADC, re-shapes on a fast drop, and sheds the load with a latched fault flag if
+the bus falls below 3.35 V.
 
-**Headline results (functional simulation):**
-- Under a worst-case inrush, the unprotected bus sags to **3.05 V** (below the
-  3.35 V brown-out line); the shaped bus holds at **3.48 V** — a **~40% reduction
-  in bus voltage sag**.
-- A constrained-random SystemVerilog testbench runs 20 randomized scenarios per
-  regression, reaches **91.7% functional coverage**, and locates the **~2.5 A
-  inrush limit** beyond which the shaper can no longer hold the bus above threshold.
-- A Perl script parses the simulation log and reports pass/fail and coverage,
-  returning a non-zero exit code on any failure.
+## Results (functional simulation)
 
----
+220 µF / 4 Ω payload on a 4.1 V single-cell bus (R_PACK = 0.3 Ω, C_BUS = 47 µF):
+
+| Metric | Unprotected | With SSPC |
+|---|---|---|
+| Minimum bus voltage | 1.654 V | **3.774 V** |
+| Sag depth (4.1 V − min) | 2.446 V | 0.326 V (**−86.7 %**) |
+| Time below 3.35 V brown-out line | ≈150 µs | 0 |
+| Peak battery current (1 µs avg) | 8.15 A | 1.05 A |
+| Outcome | brown-out | MONITOR at 20.73 ms, no fault |
+
+![Bus voltage: unprotected vs shaped turn-on](waveform.png)
+
+Sweeps over payload capacitance (47–4700 µF) and load (1.2–10 Ω) show:
+
+- Across the rated range (47–1000 µF, 2–10 Ω) the shaped bus stays above 3.47 V;
+  every unprotected turn-on browns out (1.22–2.56 V).
+- **Capacitive limit:** at the default ramp (RAMP_W = 12) the shaper passes at
+  1500 µF and faults at 2200 µF; the limit falls with heavier loads (fault at
+  1768 µF / 1.78 Ω). Larger payloads need a slower ramp.
+- **Overload:** loads above ≈2.5 A pull the steady bus below 3.35 V; the SSPC
+  correctly sheds them.
+- **Known design hole:** if the steady bus lands between 3.35 V and 3.45 V
+  (R_L ≈ 1.24–1.50 Ω) the FSM never leaves SHAPE. Fix: a watchdog in SHAPE.
+
+## Constrained-random regression (Vivado xsim 2022.2)
+
+| Run | Shaped PASS / FAIL | Baseline brown-outs | Coverage | triage.pl exit |
+|---|---|---|---|---|
+| Rated, N = 20 | 11 / 0 | 9 of 9 | 79.8 % | 0 |
+| +STRESS, N = 40 | 9 / 11 | 20 of 20 | 84.5 % | 1 |
+
+Stress failures: 10 capacitive-limit faults (C_PL 1768–4617 µF) and 1
+hysteresis-band hang (1151 µF / 1.34 Ω). An overload case (1.06 Ω) faulted and
+was correctly scored PASS.
+
+## Synthesis (Vivado 2022.2, xc7a100tcsg324-1, 50 MHz)
+
+65 LUTs · 46 FFs · 20 I/O · 1 BUFG · setup WNS +15.98 ns · hold WHS +0.22 ns · register-to-register Fmax ≈ 249 MHz (I/O paths unconstrained).
 
 ## Repository layout
 
 ```
 RTL/
-  sspc_load_shaper.v       # the DUT: FSM + PWM soft-start
-  tb_sspc.v                # plant-model testbench (shaped vs unprotected, prints min bus)
+  sspc_load_shaper.v   # DUT: 4-state FSM + PWM soft-start
+  tb_sspc.v            # directed testbench, bus + payload plant, CSV dump
 Verification/
-  sspc_if.sv               # interface + clocking block
-  sspc_txn.sv              # randomized transaction (constrained-random)
-  sspc_driver.sv           # drives the DUT + runs the bus plant model
-  sspc_scoreboard.sv       # self-checking pass/fail + feeds coverage
-  sspc_coverage.sv         # functional coverage (covergroups + cross)
-  tb_top.sv                # top: wires DUT to interface, runs 20 randomized txns
+  sspc_if.sv           # interface + clocking block
+  sspc_txn.sv          # randomized scenario (C_PL, R_L, shaper) + sspc_result
+  sspc_coverage.sv     # covergroup: 5 coverpoints, 2 crosses
+  sspc_driver.sv       # drives DUT, runs plant one step per clock
+  sspc_scoreboard.sv   # reference model (steady-state bus) + PASS/FAIL
+  tb_top.sv            # top + constrained-random generator
 Automation/
-  triage.pl                # parses a sim log, reports pass/fail + coverage
-waveform.png               # bus voltage: unprotected sag vs shaped soft-start
+  triage.pl            # parses xsim log, reports, exits 1 on failure
+waveform.png
 ```
 
----
+## The plant model
 
-## The design
-
-### Problem
-
-When a payload switches on it draws a burst of inrush current. Pulled through the
-battery's internal resistance and the harness, this sags the shared bus voltage. If
-the sag is deep enough, other loads — including the flight computer — brown out and
-reset. Aging, passively-balanced packs raise the effective series resistance and
-deepen every sag over mission life.
-
-### Approach
-
-Instead of connecting the payload directly, the FSM chops its power MOSFET with a
-ramped PWM duty cycle — a hardware soft-start. The average inrush current rises
-gradually, so the bus never sags past its brown-out threshold.
-
-Four states:
-
-| State | Behavior |
-|-------|----------|
-| `OFF` | Payload disconnected. |
-| `SHAPE` | Ramped PWM soft-start — duty climbs from ~3% toward 100%. Entered on every commanded turn-on and on any detected fast sag. |
-| `MONITOR` | Full conduction; watches for critical voltage or a fast negative dV/dt. |
-| `FAULT` | Bus went critical anyway — load shed and latched until the request clears. |
-
-Two protection paths:
-- **Proactive (primary):** every commanded turn-on (`OFF -> SHAPE`) soft-starts.
-- **Reactive (secondary):** a fast sag detected while conducting (`MONITOR -> SHAPE`)
-  re-shapes the load.
-
-### Design details worth noting
-
-- **Sample-gated dV/dt** — the voltage derivative is computed across consecutive ADC
-  *samples* (gated by `adc_valid`), not clock cycles, since the ADC updates far
-  slower than the 50 MHz clock.
-- **Saturating duty arithmetic** — the ramp saturates at full scale instead of
-  wrapping.
-- **Hysteresis on recovery** — the `SHAPE -> MONITOR` exit uses a recovery threshold
-  ~100 mV above the fault threshold, so the FSM does not chatter at the fault line.
-- **Fault telemetry** — a sticky `fault_latch` records a brown-out event for
-  flight-software readback.
-
-### Sink-side scope
-
-This is a **per-load** SSPC: it protects the bus against the inrush of the one
-payload it is in series with. It is **not** a bus-wide brownout manager — a single
-sink-side SSPC can only throttle its own load. In a full EPS, each significant load
-gets its own SSPC. Being explicit about this boundary is deliberate.
-
----
-
-## Verification
-
-The verification environment is a **class-based SystemVerilog testbench** built from
-the components UVM formalizes (interface, transaction, driver, scoreboard, coverage),
-written in plain SystemVerilog rather than the UVM library.
-
-- **Transaction (`sspc_txn.sv`)** — one stimulus item with `rand` fields (inrush
-  current, delay, shaper-on) and constraints keeping them in a sensible range.
-- **Driver (`sspc_driver.sv`)** — takes transactions, drives the DUT pins through the
-  interface, and runs the discrete bus plant model alongside.
-- **Scoreboard (`sspc_scoreboard.sv`)** — self-checking: compares the achieved
-  minimum bus voltage against the spec rule (shaped bus must stay above 3.35 V) and
-  prints PASS/FAIL.
-- **Coverage (`sspc_coverage.sv`)** — covergroups record which inrush ranges, paths,
-  and margin bands were actually exercised, plus a cross of inrush x shaper.
-
-### The plant model
-
-The testbench models the battery + bus as a discrete integrator, updated each ADC
-sample:
+Integrated every 20 ns clock. The payload starts with an empty input capacitor.
 
 ```
-i_load = load_on ? I_PEAK : 0
-i_src  = (V_OC - v_bus) / R_PACK
-q_cap  = q_cap + (i_src - i_load) * dt
-v_bus  = q_cap / C_BUS
+i_src = (V_OC - v_bus) / R_PACK
+i_sw  = sw_on ? (v_bus - v_pl) / R_SW : 0
+v_bus += (i_src - i_sw) * dt / C_BUS
+v_pl  += (i_sw - v_pl / R_L) * dt / C_PL
 ```
 
-The shaped case drives the load through the PWM output (so the average inrush is
-reduced); the unprotected case connects the load directly.
-
-Worst-case plant parameters for the headline result:
-
-| Parameter | Value | Meaning |
-|-----------|-------|---------|
-| `V_OC` | 4.10 V | Pack open-circuit voltage |
-| `R_PACK` | 0.30 ohm | Internal + harness resistance (aged) |
-| `C_BUS` | 47 uF | Bus capacitance (deliberately small) |
-| `I_PEAK` | up to 3.5 A | Payload inrush |
-
-### Results
-
-```
-==== SCOREBOARD: 19 passed, 0 failed ====
-==== COVERAGE: 91.7% ====
-```
-
-Constrained-random stimulus over the rated range passes cleanly. When the inrush
-range is widened past ~2.5 A, the scoreboard automatically catches the boundary where
-the shaper can no longer hold the bus above 3.35 V — a real, tool-found operating
-limit rather than a hand-picked test.
-
-### Waveform
-
-[Payload turn-on, unprotected vs shaped. Left: the bus sags to 3.05 V, below the 3.35 V brown-out line. Right: the FSM soft-starts the load via PWM and the bus holds at 3.48 V.]
-<img width="1568" height="759" alt="image_2026-08-20_145646184" src="https://github.com/user-attachments/assets/816fc8d0-82ad-4d29-a065-cd23e381c0af" />
-
----
-
-## Automation
-
-`Automation/triage.pl` parses a simulation log and reports results:
-
-```
-=======================================================
- SSPC Verification - Triage Report
-=======================================================
- Tests passed : 19
- Tests failed : 0
- Coverage     : 91.7%
- All tests passed.
-=======================================================
-```
-
-It reads the log byte-safe (handling Windows UTF-16/BOM logs), extracts the pass/fail
-counts and coverage percentage via regex, lists any failing cases, and exits non-zero
-if anything failed — so it can gate a CI run.
-
----
+Steady state, used by the scoreboard as its reference model:
+`V_bus,ss = V_OC (R_SW + R_L) / (R_PACK + R_SW + R_L)`.
 
 ## Reproducing
 
-Requires Xilinx Vivado (tested on 2022.2). Perl (any recent version) for the triage
-script.
+Vivado 2022.2 (xsim) or Icarus Verilog 12 for the directed testbench (both give identical results); xsim for the
+SystemVerilog environment; Perl 5 for triage.
 
-**RTL + plant testbench (the ~40% result):**
-```
+```bash
+# directed testbench (nominal turn-on)
 xvlog RTL/sspc_load_shaper.v RTL/tb_sspc.v
 xelab tb_sspc -s sspc_sim -debug typical
 xsim sspc_sim -runall
-```
+#   options: -testplusarg "CPL=470e-6" -testplusarg "RL=2.0" -testplusarg "CSV=1"  (quote on Windows)
 
-**SystemVerilog verification (coverage + scoreboard):**
-```
+# constrained-random regression
 xvlog RTL/sspc_load_shaper.v
 xvlog -sv Verification/sspc_if.sv Verification/sspc_txn.sv Verification/sspc_coverage.sv \
-         Verification/sspc_driver.sv Verification/sspc_scoreboard.sv Verification/tb_top.sv
+          Verification/sspc_driver.sv Verification/sspc_scoreboard.sv Verification/tb_top.sv
 xelab tb_top -s sv_sim -debug typical
-xsim sv_sim -runall > sim_output.log
-```
-
-**Triage:**
-```
+xsim sv_sim -runall -testplusarg "N_TXN=20" > sim_output.log
+xsim sv_sim -runall -testplusarg "N_TXN=40" -testplusarg STRESS > sim_stress.log
 perl Automation/triage.pl sim_output.log
 ```
 
----
+Icarus: `iverilog -g2012 -o sim RTL/sspc_load_shaper.v RTL/tb_sspc.v && vvp sim`
+
+## Correction to earlier results
+
+An earlier version of this repository reported a ~40 % sag reduction
+(3.05 V → 3.48 V) and a "2.5 A operating limit". Both were testbench artefacts.
+The old plant modelled the payload as a constant 3.5 A load with no input
+capacitance, so 3.05 V was just the DC drop 4.1 − 3.5 × 0.3, and the shaped value
+was read 250 µs into a 425 µs ramp. With a longer window the shaped case also
+faulted. The 2.5 A "limit" was (4.1 − 3.35)/0.3 from Ohm's law. The current plant
+models the payload's input capacitor, which is what causes inrush, and the ramp
+was retuned against it.
 
 ## Scope and honesty
 
-This is functional (behavioral) simulation of the RTL against a discrete plant model
-and an unprotected baseline. It is **not** synthesized to an FPGA, the plant is a
-lumped software model (not SPICE or measured hardware), and the verification is
-class-based SystemVerilog, **not** the UVM library. All figures are simulation results
-under the stated parameters.
+- Functional simulation against a lumped behavioural plant. Not SPICE, not
+  hardware, not run on an FPGA board.
+- PWM limits the *average* current. Each early pulse into the empty capacitor
+  still reaches ~41 A, limited only by R_SW; a real switch needs a matching
+  pulse rating or a current limit.
+- The ramp is open-loop. The bus voltage only drives state transitions.
+- ADC assumed synchronous to `clk`; no synchronizer yet.
+- Class-based SystemVerilog, **not** the UVM library.
+- Per-load protection, not bus-wide management; never placed on the OBC.
 
-## Possible extensions
+## Next steps
 
-- Port the testbench to the UVM library (sequencer, agent, factory, phases).
-- SPICE co-simulation with a commercial surge-stopper (e.g. LTC4364) as a baseline.
-- Triple-modular redundancy on the state register for single-event-upset tolerance.
-- A watchdog timeout in `SHAPE` and an ADC plausibility (stuck-value) check.
+Watchdog in SHAPE · closed-loop ramp · ADC synchronizer + ripple filter ·
+pulse-current limit · LTspice cross-check of the plant · UVM port · TMR on the
+state register · FPGA board test.

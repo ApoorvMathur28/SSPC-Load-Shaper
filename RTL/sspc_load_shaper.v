@@ -1,18 +1,30 @@
 `timescale 1ns / 1ps
 //======================================================================
-// sspc_load_shaper : RTL load shaper for CubeSat EPS
-// FSM-driven adaptive PWM soft-start to limit payload inrush current
-// and prevent bus brown-out. Functional-simulation configuration.
+// sspc_load_shaper : sink-side SSPC load shaper for a CubeSat EPS bus
+//
+// Sits in series with ONE payload. On every commanded turn-on it
+// soft-starts the payload with a ramped PWM duty cycle so the payload's
+// input-capacitor inrush cannot brown out the shared bus. While running
+// it re-shapes on a fast bus drop (sample-gated dV/dt) and sheds the
+// load (FAULT, latched) if the bus crosses the critical threshold.
+//
+// Clock: 50 MHz. ADC: 12-bit, 0-5 V (1 LSB = 1.2207 mV), new sample
+// flagged by a 1-clk adc_valid strobe (assumed synchronous to clk).
+//
+// Timing at defaults:
+//   PWM period  = 2^PWM_W  clks = 256  x 20 ns = 5.12 us  (~195 kHz)
+//   Ramp step   = 2^RAMP_W clks = 4096 x 20 ns = 81.92 us
+//   Ramp length = (255-2)/1 + 1 = 254 steps   -> ~20.8 ms (2% -> 100%)
 //======================================================================
 module sspc_load_shaper #(
     parameter integer ADC_W         = 12,
     parameter integer PWM_W         = 8,
-    parameter integer RAMP_W        = 8,          // small so sim runs fast
-    parameter [ADC_W-1:0] THRESH_CRIT    = 12'd2745,  // ~3.35 V fault line
-    parameter [ADC_W-1:0] THRESH_DVDT    = 12'd41,    // ~50 mV/sample slope
-    parameter [ADC_W-1:0] THRESH_RECOVER = 12'd2827,  // ~3.45 V recovery (hysteresis)
-    parameter [PWM_W-1:0] DUTY_START     = 8'd8,
-    parameter [PWM_W-1:0] DUTY_STEP      = 8'd3,
+    parameter integer RAMP_W        = 12,
+    parameter [ADC_W-1:0] THRESH_CRIT    = 12'd2745,  // 3.351 V brown-out line
+    parameter [ADC_W-1:0] THRESH_DVDT    = 12'd41,    // 50.0 mV drop per ADC sample
+    parameter [ADC_W-1:0] THRESH_RECOVER = 12'd2827,  // 3.451 V recovery (hysteresis)
+    parameter [PWM_W-1:0] DUTY_START     = 8'd2,      // ~0.8 % initial duty
+    parameter [PWM_W-1:0] DUTY_STEP      = 8'd1,
     parameter [PWM_W-1:0] DUTY_MAX       = 8'd255
 )(
     input  wire              clk,
@@ -59,11 +71,11 @@ module sspc_load_shaper #(
         if (!rst_n) begin
             duty_q <= 0; ramp_cnt <= 0;
         end else if (enter_shape) begin
-            duty_q <= DUTY_START; ramp_cnt <= 0;          // critical init fix
+            duty_q <= DUTY_START; ramp_cnt <= 0;           // restart ramp on every SHAPE entry
         end else if (state_q == S_SHAPE) begin
             ramp_cnt <= ramp_cnt + 1'b1;
             if (ramp_tick && !ramp_done)
-                duty_q <= (duty_q > (DUTY_MAX - DUTY_STEP)) // saturating add
+                duty_q <= (duty_q > (DUTY_MAX - DUTY_STEP))  // saturating add
                           ? DUTY_MAX : duty_q + DUTY_STEP;
         end else if (state_q == S_MONITOR) begin
             duty_q <= DUTY_MAX; ramp_cnt <= 0;
@@ -99,8 +111,8 @@ module sspc_load_shaper #(
 
     // ---- Output ----
     always @(*) case (state_q)
-        S_MONITOR: payload_pwm = 1'b1;
+        S_MONITOR: payload_pwm = 1'b1;                  // true 100 %
         S_SHAPE:   payload_pwm = (pwm_cnt < duty_q);
-        default:   payload_pwm = 1'b0;
+        default:   payload_pwm = 1'b0;                  // OFF, FAULT, illegal -> switch open
     endcase
 endmodule
